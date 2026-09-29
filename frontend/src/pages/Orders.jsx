@@ -21,7 +21,7 @@ function Orders() {
       setLoading(true);
 
       const response = await fetch(
-        "http://10.167.96.27:5000/api/orders"
+        "http://localhost:5000/api/orders"
       );
 
       const data = await response.json();
@@ -64,7 +64,7 @@ function Orders() {
 
     try {
       const response = await fetch(
-        "http://10.167.96.27:5000/api/orders",
+        "http://localhost:5000/api/orders",
         {
           method: "POST",
           headers: {
@@ -122,7 +122,7 @@ function Orders() {
 
     try {
       const response = await fetch(
-        "http://10.167.96.27:5000/api/orders/${orderId}",
+        "http://localhost:5000/api/orders/${orderId}",
         {
           method: "DELETE",
         }

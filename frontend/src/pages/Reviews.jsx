@@ -23,7 +23,7 @@ function Reviews() {
       setLoading(true);
 
       const response = await fetch(
-        "http://10.167.96.27:5000/api/reviews"
+        "http://localhost:5000/api/reviews"
       );
 
       const data = await response.json();
@@ -69,7 +69,7 @@ function Reviews() {
 
     try {
       const response = await fetch(
-        "http://10.167.96.27:5000/api/reviews",
+        "http://localhost:5000/api/reviews",
         {
           method: "POST",
           headers: {
@@ -146,7 +146,7 @@ function Reviews() {
 
     try {
       const response = await fetch(
-        `http://10.167.96.27:5000/api/reviews/${reviewId}`,
+        `http://localhost:5000/api/reviews/${reviewId}`,
         {
           method: "DELETE",
         }

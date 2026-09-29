@@ -19,7 +19,7 @@ function Categories() {
       setLoading(true);
 
       const response = await fetch(
-        "http://10.167.96.27:5000/api/categories"
+        "http://localhost:5000/api/categories"
       );
 
       const data = await response.json();
@@ -60,7 +60,7 @@ function Categories() {
 
     try {
       const response = await fetch(
-        "http://10.167.96.27:5000/api/categories",
+        "http://localhost:5000/api/categories",
         {
           method: "POST",
           headers: {
@@ -111,7 +111,7 @@ function Categories() {
 
     try {
       const response = await fetch(
-        "http://10.167.96.27:5000/api/categories/${categoryId}",
+        "http://localhost:5000/api/categories/${categoryId}",
         {
           method: "DELETE",
         }

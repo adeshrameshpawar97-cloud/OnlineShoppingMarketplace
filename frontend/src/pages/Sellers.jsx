@@ -21,7 +21,7 @@ function Sellers() {
       setLoading(true);
 
       const response = await fetch(
-        "http://10.167.96.27:5000/api/sellers"
+        "http://localhost:5000/api/sellers"
       );
 
       const data = await response.json();
@@ -62,7 +62,7 @@ function Sellers() {
 
     try {
       const response = await fetch(
-        "http://10.167.96.27:5000/api/sellers",
+        "http://localhost:5000/api/sellers",
         {
           method: "POST",
           headers: {
@@ -115,7 +115,7 @@ function Sellers() {
 
     try {
       const response = await fetch(
-        "http://10.167.96.27:5000/api/sellers/${sellerId}",
+        "http://localhost:5000/api/sellers/${sellerId}",
         {
           method: "DELETE",
         }

@@ -23,7 +23,7 @@ function Delivery() {
       setLoading(true);
 
       const response = await fetch(
-        "http://10.167.96.27:5000/api/delivery"
+        "http://localhost:5000/api/delivery"
       );
 
       const data = await response.json();
@@ -69,7 +69,7 @@ function Delivery() {
 
     try {
       const response = await fetch(
-        "http://10.167.96.27:5000/api/delivery",
+        "http://localhost:5000/api/delivery",
         {
           method: "POST",
           headers: {
@@ -135,7 +135,7 @@ function Delivery() {
 
     try {
       const response = await fetch(
-        `http://10.167.96.27:5000/api/delivery/${deliveryId}`,
+        `http://localhost:5000/api/delivery/${deliveryId}`,
         {
           method: "DELETE",
         }

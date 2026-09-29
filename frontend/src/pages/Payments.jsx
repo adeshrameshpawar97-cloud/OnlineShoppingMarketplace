@@ -23,7 +23,7 @@ function Payments() {
       setLoading(true);
 
       const response = await fetch(
-        "http://10.167.96.27:5000/api/payments"
+        "http://localhost:5000/api/payments"
       );
 
       const data = await response.json();
@@ -69,7 +69,7 @@ function Payments() {
 
     try {
       const response = await fetch(
-        "http://10.167.96.27:5000/api/payments",
+        "http://localhost:5000/api/payments",
         {
           method: "POST",
           headers: {
@@ -146,7 +146,7 @@ function Payments() {
 
     try {
       const response = await fetch(
-        "http://10.167.96.27:5000/api/payments/${paymentId}",
+        "http://localhost:5000/api/payments/${paymentId}",
         {
           method: "DELETE",
         }

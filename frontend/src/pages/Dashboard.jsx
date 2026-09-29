@@ -26,7 +26,7 @@ function Dashboard() {
       setLoading(true);
 
       const response = await fetch(
-        "http://10.167.96.27:5000/api/dashboard"
+        "http://localhost:5000/api/dashboard"
       );
 
       const data = await response.json();
