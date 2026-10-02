@@ -1,9 +1,110 @@
-from flask import Flask, jsonify, request
+import json
+import os
+import secrets
+from pathlib import Path
+from urllib.parse import parse_qs, urlencode, urlparse
+from urllib.request import Request, urlopen
+
+from flask import Flask, jsonify, request, url_for
 from flask_cors import CORS
-from db import get_db_connection
+from db import ensure_product_image_column, get_db_connection
+from decimal import Decimal
+from decimal import Decimal, ROUND_HALF_UP
 
 app = Flask(__name__)
 CORS(app)
+app.config["MAX_CONTENT_LENGTH"] = 6 * 1024 * 1024
+MAX_PRODUCT_IMAGE_BYTES = 5 * 1024 * 1024
+PRODUCT_IMAGE_DIR = Path(__file__).resolve().parent / "static" / "product-images"
+
+try:
+    ensure_product_image_column()
+except Exception:
+    app.logger.exception("Could not prepare the product image URL column")
+
+
+@app.errorhandler(413)
+def product_upload_too_large(_error):
+    return jsonify({
+        "success": False,
+        "message": "Product image uploads must be 5 MB or smaller"
+    }), 413
+
+
+def find_google_product_image(product_name):
+    api_key = os.environ.get("GOOGLE_CSE_API_KEY")
+    search_engine_id = os.environ.get("GOOGLE_CSE_CX")
+    if not api_key or not search_engine_id:
+        return None
+
+    params = urlencode({
+        "key": api_key,
+        "cx": search_engine_id,
+        "q": f"{product_name} product photo",
+        "searchType": "image",
+        "num": 5,
+        "safe": "active",
+        "rights": "cc_publicdomain,cc_attribute,cc_sharealike",
+        "fields": "items(link)",
+    })
+    request_url = f"https://www.googleapis.com/customsearch/v1?{params}"
+
+    try:
+        with urlopen(Request(request_url), timeout=6) as response:
+            results = json.loads(response.read().decode("utf-8")).get("items", [])
+        for result in results:
+            image_url = result.get("link", "")
+            if urlparse(image_url).scheme == "https":
+                return image_url
+    except Exception:
+        app.logger.warning("Google image search failed for a product")
+
+    return None
+
+
+def save_uploaded_product_image(image_file):
+    if not image_file or not image_file.filename:
+        return None, None
+
+    image_data = image_file.stream.read(MAX_PRODUCT_IMAGE_BYTES + 1)
+    if len(image_data) > MAX_PRODUCT_IMAGE_BYTES:
+        raise ValueError("Product images must be 5 MB or smaller")
+
+    signatures = (
+        (image_data.startswith(b"\xff\xd8\xff"), "jpg"),
+        (image_data.startswith(b"\x89PNG\r\n\x1a\n"), "png"),
+        (image_data.startswith((b"GIF87a", b"GIF89a")), "gif"),
+        (image_data[:4] == b"RIFF" and image_data[8:12] == b"WEBP", "webp"),
+    )
+    extension = next((ext for matches, ext in signatures if matches), None)
+    if not extension:
+        raise ValueError("Upload a valid JPG, PNG, GIF, or WebP image")
+
+    PRODUCT_IMAGE_DIR.mkdir(parents=True, exist_ok=True)
+    filename = f"{secrets.token_hex(16)}.{extension}"
+    image_path = PRODUCT_IMAGE_DIR / filename
+    image_path.write_bytes(image_data)
+    image_url = url_for("static", filename=f"product-images/{filename}", _external=True)
+    return image_url, image_path
+
+
+def validate_product_image_url(image_url):
+    image_url = (image_url or "").strip()
+    if not image_url:
+        return None
+    parsed_url = urlparse(image_url)
+    if len(image_url) > 2048 or parsed_url.scheme != "https" or not parsed_url.netloc:
+        raise ValueError("Image URL must be a valid HTTPS URL")
+
+    hostname = (parsed_url.hostname or "").lower()
+    if hostname == "bing.com" or hostname.endswith(".bing.com"):
+        media_url = parse_qs(parsed_url.query).get("mediaurl", [None])[0]
+        media_parsed_url = urlparse(media_url or "")
+        if media_parsed_url.scheme != "https" or not media_parsed_url.netloc:
+            raise ValueError("Paste the image address itself, not a search result page")
+        image_url = media_url
+
+    return image_url
 
 
 # =========================================================
@@ -240,6 +341,7 @@ def get_products():
                 p.Product_ID,
                 p.Product_Name,
                 p.Product_Description,
+                p.Product_Image_URL,
                 p.Product_Price,
                 p.Product_Stock,
                 p.Category_ID,
@@ -275,9 +377,25 @@ def get_products():
 
 @app.route("/api/products", methods=["POST"])
 def add_product():
-
+    uploaded_image_path = None
+    conn = None
+    cur = None
     try:
-        data = request.get_json()
+        data = request.form if request.mimetype == "multipart/form-data" else (request.get_json(silent=True) or {})
+        product_name = str(data.get("Product_Name", "")).strip()
+        if not product_name:
+            return jsonify({
+                "success": False,
+                "message": "Product name is required"
+            }), 400
+
+        uploaded_image = request.files.get("Product_Image")
+        if uploaded_image and uploaded_image.filename:
+            image_url, uploaded_image_path = save_uploaded_product_image(uploaded_image)
+        else:
+            image_url = validate_product_image_url(data.get("Product_Image_URL"))
+        if not image_url:
+            image_url = find_google_product_image(product_name)
 
         conn = get_db_connection()
         cur = conn.cursor()
@@ -287,16 +405,18 @@ def add_product():
             (
                 Product_Name,
                 Product_Description,
+                Product_Image_URL,
                 Product_Price,
                 Product_Stock,
                 Category_ID,
                 Seller_ID
             )
 
-            VALUES (%s, %s, %s, %s, %s, %s)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
         """, (
-            data.get("Product_Name"),
+            product_name,
             data.get("Product_Description"),
+            image_url,
             data.get("Product_Price"),
             data.get("Product_Stock"),
             data.get("Category_ID"),
@@ -307,21 +427,35 @@ def add_product():
 
         product_id = cur.lastrowid
 
-        cur.close()
-        conn.close()
-
         return jsonify({
             "success": True,
             "message": "Product added successfully",
-            "Product_ID": product_id
+            "Product_ID": product_id,
+            "Product_Image_URL": image_url,
+            "image_found": bool(image_url)
         }), 201
 
+    except ValueError as error:
+        if uploaded_image_path and uploaded_image_path.exists():
+            uploaded_image_path.unlink()
+        if conn:
+            conn.rollback()
+        return jsonify({"success": False, "message": str(error)}), 400
     except Exception as e:
+        if uploaded_image_path and uploaded_image_path.exists():
+            uploaded_image_path.unlink()
+        if conn:
+            conn.rollback()
 
         return jsonify({
             "success": False,
             "error": str(e)
         }), 500
+    finally:
+        if cur:
+            cur.close()
+        if conn:
+            conn.close()
 
 
 @app.route("/api/products/<int:product_id>", methods=["DELETE"])
@@ -844,12 +978,27 @@ def get_offers():
 
                 COUNT(
                     op.Product_ID
-                ) AS Product_Count
+                ) AS Product_Count,
+
+                GROUP_CONCAT(
+                    DISTINCT p.Product_Name
+                    ORDER BY p.Product_Name
+                    SEPARATOR ', '
+                ) AS Product_Names,
+
+                GROUP_CONCAT(
+                    DISTINCT op.Product_ID
+                    ORDER BY op.Product_ID
+                    SEPARATOR ','
+                ) AS Product_IDs
 
             FROM OFFER o
 
             LEFT JOIN OFFER_PRODUCT op
                 ON o.Offer_ID = op.Offer_ID
+
+            LEFT JOIN PRODUCT p
+                ON op.Product_ID = p.Product_ID
 
             GROUP BY
                 o.Offer_ID,
@@ -878,12 +1027,56 @@ def get_offers():
 
 @app.route("/api/offers", methods=["POST"])
 def add_offer():
-
+    conn = None
+    cur = None
     try:
-        data = request.get_json()
+        data = request.get_json(silent=True) or {}
+        raw_product_ids = data.get("Product_IDs")
+        if not isinstance(raw_product_ids, list) or not raw_product_ids:
+            return jsonify({
+                "success": False,
+                "message": "Select at least one product for this offer"
+            }), 400
+
+        try:
+            product_ids = sorted({int(product_id) for product_id in raw_product_ids})
+        except (TypeError, ValueError):
+            return jsonify({
+                "success": False,
+                "message": "Offer products must have valid product IDs"
+            }), 400
+
+        if any(product_id < 1 for product_id in product_ids):
+            return jsonify({
+                "success": False,
+                "message": "Offer products must have valid product IDs"
+            }), 400
+
+        try:
+            discount = float(data.get("Offer_Discount"))
+        except (TypeError, ValueError):
+            return jsonify({"success": False, "message": "Enter a valid discount"}), 400
+        if discount <= 0 or discount > 100:
+            return jsonify({
+                "success": False,
+                "message": "Discount must be greater than 0 and no more than 100%"
+            }), 400
 
         conn = get_db_connection()
         cur = conn.cursor()
+
+        placeholders = ", ".join(["%s"] * len(product_ids))
+        cur.execute(
+            f"SELECT Product_ID FROM PRODUCT WHERE Product_ID IN ({placeholders})",
+            tuple(product_ids)
+        )
+        found_product_ids = {int(row[0]) for row in cur.fetchall()}
+        if found_product_ids != set(product_ids):
+            conn.rollback()
+            return jsonify({
+                "success": False,
+                "message": "One or more selected products no longer exist"
+            }), 400
 
         cur.execute("""
             INSERT INTO OFFER
@@ -897,30 +1090,105 @@ def add_offer():
             VALUES (%s, %s, %s, %s)
         """, (
             data.get("Offer_Name"),
-            data.get("Offer_Discount"),
+            discount,
             data.get("Offer_StartDate"),
             data.get("Offer_EndDate")
         ))
 
-        conn.commit()
-
         offer_id = cur.lastrowid
+        cur.executemany("""
+            INSERT INTO OFFER_PRODUCT (Offer_ID, Product_ID)
+            VALUES (%s, %s)
+        """, [(offer_id, product_id) for product_id in product_ids])
 
-        cur.close()
-        conn.close()
+        conn.commit()
 
         return jsonify({
             "success": True,
             "message": "Offer added successfully",
-            "Offer_ID": offer_id
+            "Offer_ID": offer_id,
+            "Product_Count": len(product_ids)
         }), 201
 
     except Exception as e:
+        if conn:
+            conn.rollback()
 
         return jsonify({
             "success": False,
             "error": str(e)
         }), 500
+    finally:
+        if cur:
+            cur.close()
+        if conn:
+            conn.close()
+
+
+@app.route("/api/offers/<int:offer_id>/products", methods=["PUT"])
+def update_offer_products(offer_id):
+    data = request.get_json(silent=True) or {}
+    raw_product_ids = data.get("Product_IDs")
+    if not isinstance(raw_product_ids, list) or not raw_product_ids:
+        return jsonify({
+            "success": False,
+            "message": "Select at least one product for this offer"
+        }), 400
+
+    try:
+        product_ids = sorted({int(product_id) for product_id in raw_product_ids})
+    except (TypeError, ValueError):
+        return jsonify({
+            "success": False,
+            "message": "Offer products must have valid product IDs"
+        }), 400
+    if any(product_id < 1 for product_id in product_ids):
+        return jsonify({
+            "success": False,
+            "message": "Offer products must have valid product IDs"
+        }), 400
+
+    conn = None
+    cur = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute("SELECT Offer_ID FROM OFFER WHERE Offer_ID = %s", (offer_id,))
+        if not cur.fetchone():
+            return jsonify({"success": False, "message": "Offer not found"}), 404
+
+        placeholders = ", ".join(["%s"] * len(product_ids))
+        cur.execute(
+            f"SELECT Product_ID FROM PRODUCT WHERE Product_ID IN ({placeholders})",
+            tuple(product_ids)
+        )
+        found_product_ids = {int(row[0]) for row in cur.fetchall()}
+        if found_product_ids != set(product_ids):
+            return jsonify({
+                "success": False,
+                "message": "One or more selected products no longer exist"
+            }), 400
+
+        cur.execute("DELETE FROM OFFER_PRODUCT WHERE Offer_ID = %s", (offer_id,))
+        cur.executemany("""
+            INSERT INTO OFFER_PRODUCT (Offer_ID, Product_ID)
+            VALUES (%s, %s)
+        """, [(offer_id, product_id) for product_id in product_ids])
+        conn.commit()
+        return jsonify({
+            "success": True,
+            "message": "Offer products updated successfully",
+            "Product_Count": len(product_ids)
+        })
+    except Exception as error:
+        if conn:
+            conn.rollback()
+        return jsonify({"success": False, "error": str(error)}), 500
+    finally:
+        if cur:
+            cur.close()
+        if conn:
+            conn.close()
 
 
 @app.route("/api/offers/<int:offer_id>", methods=["DELETE"])
@@ -1960,6 +2228,175 @@ def delete_review(review_id):
 # =========================================================
 # RUN SERVER
 # =========================================================
+
+@app.route("/api/store/checkout", methods=["POST"])
+def store_checkout():
+    data = request.get_json(silent=True) or {}
+    customer_name = str(data.get("Customer_Name", "")).strip()
+    customer_email = str(data.get("Customer_Email", "")).strip()
+    customer_phone = str(data.get("Customer_Phone", "")).strip()
+    customer_address = str(data.get("Customer_Address", "")).strip()
+    payment_method = str(data.get("Payment_Method", "")).strip()
+    items = data.get("items")
+    allowed_methods = {
+        "UPI", "Credit Card", "Debit Card", "Net Banking", "Cash on Delivery"
+    }
+
+    if not customer_name or not customer_email or not customer_address:
+        return jsonify({
+            "success": False,
+            "message": "Name, email, and delivery address are required"
+        }), 400
+
+    if payment_method not in allowed_methods:
+        return jsonify({
+            "success": False,
+            "message": "Choose a supported payment method"
+        }), 400
+
+    if not isinstance(items, list) or not items:
+        return jsonify({"success": False, "message": "Your cart is empty"}), 400
+
+    quantities = {}
+    try:
+        for item in items:
+            product_id = int(item.get("Product_ID"))
+            quantity = int(item.get("quantity"))
+            if product_id < 1 or quantity < 1:
+                raise ValueError
+            quantities[product_id] = quantities.get(product_id, 0) + quantity
+    except (AttributeError, TypeError, ValueError):
+        return jsonify({
+            "success": False,
+            "message": "Cart items must have a valid product and quantity"
+        }), 400
+
+    conn = None
+    cur = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor(dictionary=True)
+
+        locked_products = []
+        total = Decimal("0.00")
+        for product_id, quantity in quantities.items():
+            cur.execute("""
+                SELECT
+                    p.Product_ID,
+                    p.Product_Name,
+                    p.Product_Price,
+                    p.Product_Stock,
+                    COALESCE((
+                        SELECT MAX(o.Offer_Discount)
+                        FROM OFFER_PRODUCT op
+                        INNER JOIN OFFER o ON o.Offer_ID = op.Offer_ID
+                        WHERE op.Product_ID = p.Product_ID
+                          AND (o.Offer_StartDate IS NULL OR o.Offer_StartDate <= CURRENT_DATE)
+                          AND (o.Offer_EndDate IS NULL OR o.Offer_EndDate >= CURRENT_DATE)
+                    ), 0) AS Offer_Discount
+                FROM PRODUCT p
+                WHERE p.Product_ID = %s
+                FOR UPDATE
+            """, (product_id,))
+            product = cur.fetchone()
+            if not product:
+                raise ValueError("A product in your cart is no longer available")
+            if quantity > int(product["Product_Stock"]):
+                raise ValueError(
+                    f"Only {product['Product_Stock']} units of {product['Product_Name']} are available"
+                )
+            discount = Decimal(str(product["Offer_Discount"] or 0))
+            unit_price = (
+                Decimal(str(product["Product_Price"]))
+                * (Decimal("1") - discount / Decimal("100"))
+            ).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+            total += unit_price * quantity
+            locked_products.append((product, quantity, unit_price))
+
+        cur.execute("""
+            SELECT Customer_ID
+            FROM CUSTOMER
+            WHERE Customer_Email = %s
+            LIMIT 1
+            FOR UPDATE
+        """, (customer_email,))
+        customer = cur.fetchone()
+        if customer:
+            customer_id = customer["Customer_ID"]
+            cur.execute("""
+                UPDATE CUSTOMER
+                SET Customer_Name = %s, Customer_Address = %s
+                WHERE Customer_ID = %s
+            """, (customer_name, customer_address, customer_id))
+        else:
+            cur.execute("""
+                INSERT INTO CUSTOMER (Customer_Name, Customer_Email, Customer_Address)
+                VALUES (%s, %s, %s)
+            """, (customer_name, customer_email, customer_address))
+            customer_id = cur.lastrowid
+
+        if customer_phone:
+            cur.execute("""
+                SELECT Customer_ID
+                FROM CUSTOMER_PHONE
+                WHERE Customer_ID = %s AND Customer_Phone = %s
+            """, (customer_id, customer_phone))
+            if not cur.fetchone():
+                cur.execute("""
+                    INSERT INTO CUSTOMER_PHONE (Customer_ID, Customer_Phone)
+                    VALUES (%s, %s)
+                """, (customer_id, customer_phone))
+
+        cur.execute("""
+            INSERT INTO ORDERS (Customer_ID, Order_Date, Order_Status)
+            VALUES (%s, CURRENT_DATE, 'Pending')
+        """, (customer_id,))
+        order_id = cur.lastrowid
+
+        for product, quantity, unit_price in locked_products:
+            cur.execute("""
+                INSERT INTO ORDER_ITEM
+                    (Order_ID, Product_ID, OrderItem_Quantity, OrderItem_Price)
+                VALUES (%s, %s, %s, %s)
+            """, (order_id, product["Product_ID"], quantity, unit_price))
+            cur.execute("""
+                UPDATE PRODUCT
+                SET Product_Stock = Product_Stock - %s
+                WHERE Product_ID = %s
+            """, (quantity, product["Product_ID"]))
+
+        cur.execute("""
+            INSERT INTO PAYMENT
+                (Order_ID, Payment_Date, Payment_Method, Payment_Status, Payment_Amount)
+            VALUES (%s, CURRENT_DATE, %s, 'Pending', %s)
+        """, (order_id, payment_method, total))
+        cur.execute("""
+            INSERT INTO DELIVERY
+                (Order_ID, Delivery_Date, Delivery_Status, Delivery_Address)
+            VALUES (%s, CURRENT_DATE, 'Pending', %s)
+        """, (order_id, customer_address))
+
+        conn.commit()
+        return jsonify({
+            "success": True,
+            "Order_ID": order_id,
+            "total": format(total, ".2f"),
+            "message": "Order placed successfully. Payment is pending confirmation."
+        }), 201
+    except ValueError as error:
+        if conn:
+            conn.rollback()
+        return jsonify({"success": False, "message": str(error)}), 400
+    except Exception as error:
+        if conn:
+            conn.rollback()
+        return jsonify({"success": False, "message": str(error)}), 500
+    finally:
+        if cur:
+            cur.close()
+        if conn:
+            conn.close()
+
 
 if __name__ == "__main__":
 

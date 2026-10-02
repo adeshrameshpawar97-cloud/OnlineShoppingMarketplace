@@ -1,115 +1,77 @@
 import { NavLink } from "react-router-dom";
+import {
+  ClipboardList,
+  CreditCard,
+  LayoutDashboard,
+  Package,
+  Star,
+  Store,
+  Tags,
+  Truck,
+  UsersRound,
+  ShoppingCart,
+} from "lucide-react";
+
+const navSections = [
+  {
+    title: "Overview",
+    items: [
+      { to: "/", label: "Dashboard", icon: LayoutDashboard },
+    ],
+  },
+  {
+    title: "Marketplace",
+    items: [
+      { to: "/products", label: "Products", icon: Package },
+      { to: "/categories", label: "Categories", icon: Tags },
+      { to: "/offers", label: "Offers", icon: Store },
+    ],
+  },
+  {
+    title: "People",
+    items: [
+      { to: "/customers", label: "Customers", icon: UsersRound },
+      { to: "/sellers", label: "Sellers", icon: Store },
+    ],
+  },
+  {
+    title: "Operations",
+    items: [
+      { to: "/orders", label: "Orders", icon: ShoppingCart },
+      { to: "/order-items", label: "Order Items", icon: ClipboardList },
+      { to: "/payments", label: "Payments", icon: CreditCard },
+      { to: "/delivery", label: "Delivery", icon: Truck },
+      { to: "/reviews", label: "Reviews", icon: Star },
+    ],
+  },
+];
 
 function Sidebar() {
   return (
     <aside className="sidebar">
-
-      <div className="logo">
-        Shop<span>Sphere</span>
+      <div className="brand-block">
+        <div className="brand-mark">G</div>
+        <div>
+          <div className="brand-name">GridMart</div>
+          <div className="brand-tag">Commerce OS</div>
+        </div>
       </div>
 
-      <p className="logo-subtitle">
-        Online Shopping Marketplace
-      </p>
-
-      <div className="menu-title">MAIN</div>
-
-      <NavLink
-        to="/"
-        className={({ isActive }) =>
-          `nav-link ${isActive ? "active" : ""}`
-        }
-      >
-        <span>📊</span>
-        Dashboard
-      </NavLink>
-
-      <div className="menu-title">MARKETPLACE</div>
-
-      <NavLink
-        to="/products"
-        className="nav-link"
-      >
-        <span>📦</span>
-        Products
-      </NavLink>
-
-      <NavLink
-        to="/categories"
-        className="nav-link"
-      >
-        <span>📂</span>
-        Categories
-      </NavLink>
-
-      <NavLink
-        to="/offers"
-        className="nav-link"
-      >
-        <span>🎁</span>
-        Offers
-      </NavLink>
-
-      <div className="menu-title">USERS</div>
-
-      <NavLink
-        to="/customers"
-        className="nav-link"
-      >
-        <span>👤</span>
-        Customers
-      </NavLink>
-
-      <NavLink
-        to="/sellers"
-        className="nav-link"
-      >
-        <span>🏪</span>
-        Sellers
-      </NavLink>
-
-      <div className="menu-title">ORDERS</div>
-
-      <NavLink
-        to="/orders"
-        className="nav-link"
-      >
-        <span>🛒</span>
-        Orders
-      </NavLink>
-
-      <NavLink
-        to="/order-items"
-        className="nav-link"
-      >
-        <span>📋</span>
-        Order Items
-      </NavLink>
-
-      <NavLink
-        to="/payments"
-        className="nav-link"
-      >
-        <span>💳</span>
-        Payments
-      </NavLink>
-
-      <NavLink
-        to="/delivery"
-        className="nav-link"
-      >
-        <span>🚚</span>
-        Delivery
-      </NavLink>
-
-      <NavLink
-        to="/reviews"
-        className="nav-link"
-      >
-        <span>⭐</span>
-        Reviews
-      </NavLink>
-
+      {navSections.map((section) => (
+        <div key={section.title}>
+          <div className="menu-title">{section.title}</div>
+          {section.items.map((item) => (
+            <NavLink
+              key={item.to}
+              to={item.to}
+              className={({ isActive }) => `nav-link ${isActive ? "active" : ""}`}
+            >
+                <span><item.icon size={18} strokeWidth={1.8} aria-hidden="true" /></span>
+              {item.label}
+            </NavLink>
+          ))}
+        </div>
+      ))}
     </aside>
   );
 }

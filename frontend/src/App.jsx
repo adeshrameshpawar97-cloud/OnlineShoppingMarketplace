@@ -15,6 +15,7 @@ import OrderItems from "./pages/OrderItems";
 import Payments from "./pages/Payments";
 import Delivery from "./pages/Delivery";
 import Reviews from "./pages/Reviews";
+import Storefront from "./pages/Storefront";
 
 
 function ProtectedLayout() {
@@ -114,6 +115,11 @@ function App() {
       <Route
         path="/login"
         element={<Login />}
+      />
+
+      <Route
+        path="/shop"
+        element={<Storefront />}
       />
 
       <Route
