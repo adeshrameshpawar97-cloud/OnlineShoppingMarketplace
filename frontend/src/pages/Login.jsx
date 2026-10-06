@@ -1,49 +1,86 @@
 import { useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import { PackageCheck, Package, TrendingUp } from "lucide-react";
+import { saveMarketplaceSession } from "../auth";
+
+const API = "http://localhost:5000/api";
 
 function Login() {
   const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
+  const requestedRole = searchParams.get("role");
+  const role = ["customer", "seller"].includes(requestedRole) ? requestedRole : "admin";
+  const [isRegistering, setIsRegistering] = useState(false);
   const [username, setUsername] = useState("admin");
-  const [password, setPassword] = useState("admin123");
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState(role === "admin" ? "admin123" : "");
+  const [name, setName] = useState("");
+  const [phone, setPhone] = useState("");
+  const [address, setAddress] = useState("");
   const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
 
-  const handleLogin = async (e) => {
-    e.preventDefault();
+  const selectRole = (nextRole) => {
+    setSearchParams(nextRole === "admin" ? {} : { role: nextRole });
+    setIsRegistering(false);
+    setPassword(nextRole === "admin" ? "admin123" : "");
+    setError("");
+  };
 
-    if (!username || !password) {
-      alert("Please enter username and password.");
+  const handleLogin = async (event) => {
+    event.preventDefault();
+    setError("");
+    if (role === "admin" && (!username || !password)) {
+      setError("Please enter username and password.");
+      return;
+    }
+    if (role !== "admin" && (!email || !password || (isRegistering && (!name || !address)))) {
+      setError("Complete all required fields.");
       return;
     }
 
     try {
       setLoading(true);
-
-      const response = await fetch("http://localhost:5000/api/login", {
+      const endpoint = role === "admin"
+        ? `${API}/login`
+        : isRegistering ? `${API}/auth/register/${role}` : `${API}/auth/login/${role}`;
+      const body = role === "admin"
+        ? { username, password }
+        : {
+          [role === "customer" ? "Customer_Name" : "Seller_Name"]: name,
+          [role === "customer" ? "Customer_Email" : "Seller_Email"]: email,
+          [role === "customer" ? "Customer_Phone" : "Seller_Phone"]: phone,
+          [role === "customer" ? "Customer_Address" : "Seller_Address"]: address,
+          email,
+          password,
+        };
+      const response = await fetch(endpoint, {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({ username, password }),
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
       });
-
       const data = await response.json();
-
       if (!response.ok || !data.success) {
-        alert(data.message || "Invalid username or password.");
-        return;
+        throw new Error(data.message || "Unable to sign in.");
       }
 
-      localStorage.setItem("adminLoggedIn", "true");
-      localStorage.setItem("adminUsername", data.username);
-      navigate("/");
-    } catch (error) {
-      console.error(error);
-      alert("Unable to connect to backend.");
+      if (role === "admin") {
+        localStorage.setItem("adminLoggedIn", "true");
+        localStorage.setItem("adminUsername", data.username);
+        navigate("/");
+      } else {
+        saveMarketplaceSession(role, data);
+        navigate(role === "customer" ? "/shop" : "/seller");
+      }
+    } catch (loginError) {
+      console.error(loginError);
+      setError(loginError.message || "Unable to connect to backend.");
     } finally {
       setLoading(false);
     }
   };
+
+  const roleLabel = role === "admin" ? "Admin" : role === "customer" ? "Customer" : "Seller";
 
   return (
     <div className="login-page">
@@ -65,40 +102,98 @@ function Login() {
 
         <div className="login-panel login-panel-form">
           <div className="login-logo">Shop<span>Sphere</span></div>
-          <h2>Admin Login</h2>
-          <p className="login-subtitle">Enter your marketplace credentials</p>
+          <div className="login-role-tabs" aria-label="Choose account type">
+            {["admin", "customer", "seller"].map((option) => (
+              <button
+                key={option}
+                type="button"
+                className={role === option ? "selected" : ""}
+                onClick={() => selectRole(option)}
+              >{option[0].toUpperCase() + option.slice(1)}</button>
+            ))}
+          </div>
+          <h2>{isRegistering ? `Create ${roleLabel.toLowerCase()} account` : `${roleLabel} Login`}</h2>
+          <p className="login-subtitle">
+            {role === "admin" ? "Enter your marketplace credentials" : "Sign in to your own marketplace workspace"}
+          </p>
 
           <form onSubmit={handleLogin}>
-            <div className="login-field">
-              <label>Username</label>
-              <input
-                type="text"
-                placeholder="Enter username"
-                value={username}
-                onChange={(e) => setUsername(e.target.value)}
-              />
-            </div>
+            {role === "admin" ? (
+              <div className="login-field">
+                <label>Username</label>
+                <input
+                  type="text"
+                  placeholder="Enter username"
+                  value={username}
+                  onChange={(event) => setUsername(event.target.value)}
+                />
+              </div>
+            ) : isRegistering ? (
+              <>
+                <div className="login-field">
+                  <label>Full name</label>
+                  <input required autoComplete="name" value={name} onChange={(event) => setName(event.target.value)} />
+                </div>
+                <div className="login-field">
+                  <label>Email</label>
+                  <input required type="email" autoComplete="email" value={email} onChange={(event) => setEmail(event.target.value)} />
+                </div>
+                <div className="login-field">
+                  <label>Phone <span>(optional)</span></label>
+                  <input type="tel" autoComplete="tel" value={phone} onChange={(event) => setPhone(event.target.value)} />
+                </div>
+                <div className="login-field">
+                  <label>Address</label>
+                  <input required autoComplete="street-address" value={address} onChange={(event) => setAddress(event.target.value)} />
+                </div>
+              </>
+            ) : (
+              <div className="login-field">
+                <label>Email</label>
+                <input
+                  required
+                  type="email"
+                  autoComplete="email"
+                  placeholder="you@example.com"
+                  value={email}
+                  onChange={(event) => setEmail(event.target.value)}
+                />
+              </div>
+            )}
 
             <div className="login-field">
-              <label>Password</label>
+              <label>Password {isRegistering && <span>(at least 8 characters)</span>}</label>
               <input
+                required
+                minLength={isRegistering ? 8 : undefined}
                 type="password"
+                autoComplete={isRegistering ? "new-password" : "current-password"}
                 placeholder="Enter password"
                 value={password}
-                onChange={(e) => setPassword(e.target.value)}
+                onChange={(event) => setPassword(event.target.value)}
               />
             </div>
 
+            {error && <p className="login-error" role="alert">{error}</p>}
             <button type="submit" className="login-button" disabled={loading}>
-              {loading ? "Logging in..." : "Login to dashboard"}
+              {loading ? "Please wait..." : isRegistering ? "Create account" : `Login as ${roleLabel.toLowerCase()}`}
             </button>
           </form>
 
-          <div className="demo-login">
-            <strong>Demo Credentials</strong>
-            <div>Username: admin</div>
-            <div>Password: admin123</div>
-          </div>
+          {role === "admin" ? (
+            <div className="demo-login">
+              <strong>Demo Credentials</strong>
+              <div>Username: admin</div>
+              <div>Password: admin123</div>
+            </div>
+          ) : (
+            <p className="login-account-switch">
+              {isRegistering ? "Already have an account?" : "New to GridMart?"}{" "}
+              <button type="button" onClick={() => { setIsRegistering(!isRegistering); setError(""); }}>
+                {isRegistering ? "Sign in" : "Create an account"}
+              </button>
+            </p>
+          )}
         </div>
       </div>
     </div>

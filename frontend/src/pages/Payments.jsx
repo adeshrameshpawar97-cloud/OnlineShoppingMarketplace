@@ -146,7 +146,7 @@ function Payments() {
 
     try {
       const response = await fetch(
-        "http://localhost:5000/api/payments/${paymentId}",
+        `http://localhost:5000/api/payments/${paymentId}`,
         {
           method: "DELETE",
         }

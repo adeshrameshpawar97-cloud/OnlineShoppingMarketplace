@@ -29,3 +29,31 @@ def ensure_product_image_column():
     finally:
         cursor.close()
         connection.close()
+
+
+def ensure_marketplace_account_table():
+    connection = get_db_connection()
+    cursor = connection.cursor()
+
+    try:
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS MARKETPLACE_ACCOUNT (
+                Account_ID INT NOT NULL AUTO_INCREMENT,
+                Account_Role VARCHAR(16) NOT NULL,
+                User_ID INT NOT NULL,
+                Account_Email VARCHAR(254) NOT NULL,
+                Password_Hash VARCHAR(255) NOT NULL,
+                PRIMARY KEY (Account_ID),
+                UNIQUE KEY uq_marketplace_account_role_email
+                    (Account_Role, Account_Email),
+                UNIQUE KEY uq_marketplace_account_role_user
+                    (Account_Role, User_ID)
+            )
+        """)
+        connection.commit()
+    except Exception:
+        connection.rollback()
+        raise
+    finally:
+        cursor.close()
+        connection.close()

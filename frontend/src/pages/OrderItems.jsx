@@ -130,7 +130,7 @@ function OrderItems() {
 
     try {
       const response = await fetch(
-        "http://localhost:5000/api/order-items/${orderItemId}",
+        `http://localhost:5000/api/order-items/${orderItemId}`,
         {
           method: "DELETE",
         }

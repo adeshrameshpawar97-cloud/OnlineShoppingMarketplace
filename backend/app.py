@@ -1,17 +1,22 @@
 import json
 import os
 import secrets
+from functools import wraps
 from pathlib import Path
 from urllib.parse import parse_qs, urlencode, urlparse
 from urllib.request import Request, urlopen
 
-from flask import Flask, jsonify, request, url_for
+from flask import Flask, g, jsonify, request, url_for
 from flask_cors import CORS
-from db import ensure_product_image_column, get_db_connection
+from db import ensure_marketplace_account_table, ensure_product_image_column, get_db_connection
 from decimal import Decimal
 from decimal import Decimal, ROUND_HALF_UP
+from itsdangerous import BadSignature, URLSafeTimedSerializer
+from mysql.connector.errors import IntegrityError
+from werkzeug.security import check_password_hash, generate_password_hash
 
 app = Flask(__name__)
+app.secret_key = os.environ.get("MARKETPLACE_SECRET_KEY") or secrets.token_urlsafe(32)
 CORS(app)
 app.config["MAX_CONTENT_LENGTH"] = 6 * 1024 * 1024
 MAX_PRODUCT_IMAGE_BYTES = 5 * 1024 * 1024
@@ -22,6 +27,213 @@ try:
 except Exception:
     app.logger.exception("Could not prepare the product image URL column")
 
+try:
+    ensure_marketplace_account_table()
+except Exception:
+    app.logger.exception("Could not prepare the marketplace account table")
+
+
+def marketplace_token_serializer():
+    return URLSafeTimedSerializer(app.secret_key, salt="marketplace-account-v1")
+
+
+def create_marketplace_session(role, user_id, name, email):
+    user = {
+        "role": role,
+        "id": int(user_id),
+        "name": name,
+        "email": email,
+    }
+    return {
+        "token": marketplace_token_serializer().dumps(user),
+        "user": user,
+    }
+
+
+def require_marketplace_role(role):
+    def decorator(view):
+        @wraps(view)
+        def wrapped(*args, **kwargs):
+            authorization = request.headers.get("Authorization", "")
+            scheme, _, token = authorization.partition(" ")
+            if scheme.lower() != "bearer" or not token:
+                return jsonify({"success": False, "message": "Please sign in to continue"}), 401
+
+            try:
+                user = marketplace_token_serializer().loads(token, max_age=60 * 60 * 12)
+            except BadSignature:
+                return jsonify({"success": False, "message": "Your session has expired. Please sign in again."}), 401
+
+            if user.get("role") != role:
+                return jsonify({"success": False, "message": "You do not have permission to access this resource"}), 403
+
+            g.marketplace_user = user
+            return view(*args, **kwargs)
+
+        return wrapped
+
+    return decorator
+
+
+def account_payload(data, role):
+    name_key = "Customer_Name" if role == "customer" else "Seller_Name"
+    email_key = "Customer_Email" if role == "customer" else "Seller_Email"
+    phone_key = "Customer_Phone" if role == "customer" else "Seller_Phone"
+    address_key = "Customer_Address" if role == "customer" else "Seller_Address"
+    name = str(data.get(name_key, "")).strip()
+    email = str(data.get(email_key, "")).strip().lower()
+    password = data.get("password", "")
+    phone = str(data.get(phone_key, "")).strip()
+    address = str(data.get(address_key, "")).strip()
+
+    if not name or not email or not address or "@" not in email:
+        raise ValueError("Name, a valid email address, and address are required")
+    if not isinstance(password, str) or len(password) < 8:
+        raise ValueError("Password must be at least 8 characters")
+
+    return name, email, phone, address, password
+
+
+def create_account(role, data):
+    name, email, phone, address, password = account_payload(data, role)
+    table = "CUSTOMER" if role == "customer" else "SELLER"
+    id_column = "Customer_ID" if role == "customer" else "Seller_ID"
+    name_column = "Customer_Name" if role == "customer" else "Seller_Name"
+    email_column = "Customer_Email" if role == "customer" else "Seller_Email"
+    address_column = "Customer_Address" if role == "customer" else "Seller_Address"
+
+    conn = None
+    cur = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor(dictionary=True)
+        cur.execute(
+            "SELECT Account_ID FROM MARKETPLACE_ACCOUNT WHERE Account_Role = %s AND Account_Email = %s",
+            (role, email),
+        )
+        if cur.fetchone():
+            return jsonify({"success": False, "message": "An account with this email already exists"}), 409
+
+        cur.execute(
+            f"SELECT {id_column} AS user_id FROM {table} WHERE {email_column} = %s LIMIT 1 FOR UPDATE",
+            (email,),
+        )
+        existing_user = cur.fetchone()
+        if existing_user:
+            user_id = existing_user["user_id"]
+            cur.execute(
+                f"UPDATE {table} SET {name_column} = %s, {address_column} = %s WHERE {id_column} = %s",
+                (name, address, user_id),
+            )
+        elif role == "customer":
+            cur.execute(
+                "INSERT INTO CUSTOMER (Customer_Name, Customer_Email, Customer_Address) VALUES (%s, %s, %s)",
+                (name, email, address),
+            )
+            user_id = cur.lastrowid
+        else:
+            cur.execute(
+                "INSERT INTO SELLER (Seller_Name, Seller_Email, Seller_Phone, Seller_Address) VALUES (%s, %s, %s, %s)",
+                (name, email, phone or None, address),
+            )
+            user_id = cur.lastrowid
+
+        if role == "customer" and phone:
+            cur.execute(
+                "SELECT Customer_ID FROM CUSTOMER_PHONE WHERE Customer_ID = %s AND Customer_Phone = %s",
+                (user_id, phone),
+            )
+            if not cur.fetchone():
+                cur.execute(
+                    "INSERT INTO CUSTOMER_PHONE (Customer_ID, Customer_Phone) VALUES (%s, %s)",
+                    (user_id, phone),
+                )
+
+        cur.execute(
+            """
+            INSERT INTO MARKETPLACE_ACCOUNT
+                (Account_Role, User_ID, Account_Email, Password_Hash)
+            VALUES (%s, %s, %s, %s)
+            """,
+            (role, user_id, email, generate_password_hash(password)),
+        )
+        conn.commit()
+        return jsonify({
+            "success": True,
+            **create_marketplace_session(role, user_id, name, email),
+        }), 201
+    except IntegrityError:
+        if conn:
+            conn.rollback()
+        return jsonify({"success": False, "message": "An account with this email already exists"}), 409
+    except Exception:
+        if conn:
+            conn.rollback()
+        app.logger.exception("Could not create %s account", role)
+        return jsonify({"success": False, "message": "Unable to create account"}), 500
+    finally:
+        if cur:
+            cur.close()
+        if conn:
+            conn.close()
+
+
+@app.route("/api/auth/register/<role>", methods=["POST"])
+def register_marketplace_account(role):
+    if role not in {"customer", "seller"}:
+        return jsonify({"success": False, "message": "Choose customer or seller registration"}), 404
+    try:
+        return create_account(role, request.get_json(silent=True) or {})
+    except ValueError as error:
+        return jsonify({"success": False, "message": str(error)}), 400
+
+
+@app.route("/api/auth/login/<role>", methods=["POST"])
+def login_marketplace_account(role):
+    if role not in {"customer", "seller"}:
+        return jsonify({"success": False, "message": "Choose customer or seller login"}), 404
+    data = request.get_json(silent=True) or {}
+    email = str(data.get("email", "")).strip().lower()
+    password = data.get("password", "")
+    if not email or not isinstance(password, str) or not password:
+        return jsonify({"success": False, "message": "Email and password are required"}), 400
+
+    conn = None
+    cur = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor(dictionary=True)
+        cur.execute("""
+            SELECT
+                a.User_ID,
+                a.Account_Email,
+                a.Password_Hash,
+                CASE
+                    WHEN a.Account_Role = 'customer' THEN c.Customer_Name
+                    ELSE s.Seller_Name
+                END AS User_Name
+            FROM MARKETPLACE_ACCOUNT a
+            LEFT JOIN CUSTOMER c
+                ON a.Account_Role = 'customer' AND a.User_ID = c.Customer_ID
+            LEFT JOIN SELLER s
+                ON a.Account_Role = 'seller' AND a.User_ID = s.Seller_ID
+            WHERE a.Account_Role = %s AND a.Account_Email = %s
+        """, (role, email))
+        account = cur.fetchone()
+        if not account or not check_password_hash(account["Password_Hash"], password):
+            return jsonify({"success": False, "message": "Invalid email or password"}), 401
+        return jsonify({
+            "success": True,
+            **create_marketplace_session(role, account["User_ID"], account["User_Name"], account["Account_Email"]),
+        })
+    except Exception:
+        app.logger.exception("Could not sign in %s account", role)
+        return jsonify({"success": False, "message": "Unable to sign in right now"}), 500
+    finally:
+        if cur:
+            cur.close()
+        if conn:
+            conn.close()
 
 @app.errorhandler(413)
 def product_upload_too_large(_error):
@@ -2226,11 +2438,229 @@ def delete_review(review_id):
 
 
 # =========================================================
+# CUSTOMER AND SELLER PORTALS
+# =========================================================
+
+@app.route("/api/customer/orders", methods=["GET"])
+@require_marketplace_role("customer")
+def get_customer_account_orders():
+    conn = None
+    cur = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor(dictionary=True)
+        cur.execute("""
+            SELECT
+                o.Order_ID,
+                o.Order_Date,
+                o.Order_Status,
+                COALESCE(SUM(oi.OrderItem_Quantity * oi.OrderItem_Price), 0) AS Order_Amount,
+                GROUP_CONCAT(DISTINCT p.Product_Name ORDER BY p.Product_Name SEPARATOR ', ') AS Products
+            FROM ORDERS o
+            LEFT JOIN ORDER_ITEM oi ON o.Order_ID = oi.Order_ID
+            LEFT JOIN PRODUCT p ON oi.Product_ID = p.Product_ID
+            WHERE o.Customer_ID = %s
+            GROUP BY o.Order_ID, o.Order_Date, o.Order_Status
+            ORDER BY o.Order_ID DESC
+        """, (g.marketplace_user["id"],))
+        return jsonify(cur.fetchall())
+    except Exception:
+        app.logger.exception("Could not load customer order history")
+        return jsonify({"success": False, "message": "Unable to load your orders"}), 500
+    finally:
+        if cur:
+            cur.close()
+        if conn:
+            conn.close()
+
+
+@app.route("/api/seller/products", methods=["GET"])
+@require_marketplace_role("seller")
+def get_seller_account_products():
+    conn = None
+    cur = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor(dictionary=True)
+        cur.execute("""
+            SELECT
+                p.Product_ID,
+                p.Product_Name,
+                p.Product_Description,
+                p.Product_Image_URL,
+                p.Product_Price,
+                p.Product_Stock,
+                p.Category_ID,
+                c.Category_Name
+            FROM PRODUCT p
+            LEFT JOIN CATEGORY c ON p.Category_ID = c.Category_ID
+            WHERE p.Seller_ID = %s
+            ORDER BY p.Product_ID DESC
+        """, (g.marketplace_user["id"],))
+        return jsonify(cur.fetchall())
+    except Exception:
+        app.logger.exception("Could not load seller products")
+        return jsonify({"success": False, "message": "Unable to load your products"}), 500
+    finally:
+        if cur:
+            cur.close()
+        if conn:
+            conn.close()
+
+
+@app.route("/api/seller/products", methods=["POST"])
+@require_marketplace_role("seller")
+def add_seller_account_product():
+    uploaded_image_path = None
+    conn = None
+    cur = None
+    try:
+        data = request.form if request.mimetype == "multipart/form-data" else (request.get_json(silent=True) or {})
+        product_name = str(data.get("Product_Name", "")).strip()
+        if not product_name:
+            return jsonify({"success": False, "message": "Product name is required"}), 400
+
+        try:
+            price = Decimal(str(data.get("Product_Price", "")))
+            stock = int(data.get("Product_Stock", ""))
+            category_id = int(data.get("Category_ID", ""))
+        except (ValueError, TypeError, ArithmeticError):
+            return jsonify({"success": False, "message": "Enter a valid price, stock quantity, and category"}), 400
+        if not price.is_finite() or price <= 0 or stock < 0 or category_id < 1:
+            return jsonify({"success": False, "message": "Price must be positive, stock cannot be negative, and category is required"}), 400
+
+        uploaded_image = request.files.get("Product_Image")
+        if uploaded_image and uploaded_image.filename:
+            image_url, uploaded_image_path = save_uploaded_product_image(uploaded_image)
+        else:
+            image_url = validate_product_image_url(data.get("Product_Image_URL"))
+        if not image_url:
+            image_url = find_google_product_image(product_name)
+
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute("""
+            INSERT INTO PRODUCT
+                (Product_Name, Product_Description, Product_Image_URL,
+                 Product_Price, Product_Stock, Category_ID, Seller_ID)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
+        """, (
+            product_name,
+            str(data.get("Product_Description", "")).strip() or None,
+            image_url,
+            price,
+            stock,
+            category_id,
+            g.marketplace_user["id"],
+        ))
+        conn.commit()
+        return jsonify({
+            "success": True,
+            "Product_ID": cur.lastrowid,
+            "Product_Image_URL": image_url,
+        }), 201
+    except ValueError as error:
+        if uploaded_image_path and uploaded_image_path.exists():
+            uploaded_image_path.unlink()
+        if conn:
+            conn.rollback()
+        return jsonify({"success": False, "message": str(error)}), 400
+    except Exception:
+        if uploaded_image_path and uploaded_image_path.exists():
+            uploaded_image_path.unlink()
+        if conn:
+            conn.rollback()
+        app.logger.exception("Could not add seller product")
+        return jsonify({"success": False, "message": "Unable to add product"}), 500
+    finally:
+        if cur:
+            cur.close()
+        if conn:
+            conn.close()
+
+
+@app.route("/api/seller/products/<int:product_id>", methods=["DELETE"])
+@require_marketplace_role("seller")
+def delete_seller_account_product(product_id):
+    conn = None
+    cur = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute(
+            "DELETE FROM PRODUCT WHERE Product_ID = %s AND Seller_ID = %s",
+            (product_id, g.marketplace_user["id"]),
+        )
+        if not cur.rowcount:
+            return jsonify({"success": False, "message": "Product not found"}), 404
+        conn.commit()
+        return jsonify({"success": True, "message": "Product deleted"})
+    except Exception:
+        if conn:
+            conn.rollback()
+        app.logger.exception("Could not delete seller product")
+        return jsonify({"success": False, "message": "Unable to delete product"}), 500
+    finally:
+        if cur:
+            cur.close()
+        if conn:
+            conn.close()
+
+
+@app.route("/api/seller/orders", methods=["GET"])
+@require_marketplace_role("seller")
+def get_seller_account_orders():
+    conn = None
+    cur = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor(dictionary=True)
+        cur.execute("""
+            SELECT
+                o.Order_ID,
+                o.Order_Date,
+                o.Order_Status,
+                c.Customer_Name,
+                SUM(oi.OrderItem_Quantity * oi.OrderItem_Price) AS Order_Amount,
+                GROUP_CONCAT(DISTINCT p.Product_Name ORDER BY p.Product_Name SEPARATOR ', ') AS Products
+            FROM ORDERS o
+            INNER JOIN ORDER_ITEM oi ON o.Order_ID = oi.Order_ID
+            INNER JOIN PRODUCT p ON oi.Product_ID = p.Product_ID
+            LEFT JOIN CUSTOMER c ON o.Customer_ID = c.Customer_ID
+            WHERE p.Seller_ID = %s
+            GROUP BY o.Order_ID, o.Order_Date, o.Order_Status, c.Customer_Name
+            ORDER BY o.Order_ID DESC
+        """, (g.marketplace_user["id"],))
+        return jsonify(cur.fetchall())
+    except Exception:
+        app.logger.exception("Could not load seller orders")
+        return jsonify({"success": False, "message": "Unable to load your orders"}), 500
+    finally:
+        if cur:
+            cur.close()
+        if conn:
+            conn.close()
+
+
+# =========================================================
 # RUN SERVER
 # =========================================================
 
 @app.route("/api/store/checkout", methods=["POST"])
 def store_checkout():
+    authenticated_customer = None
+    authorization = request.headers.get("Authorization", "")
+    if authorization:
+        scheme, _, token = authorization.partition(" ")
+        if scheme.lower() != "bearer" or not token:
+            return jsonify({"success": False, "message": "Invalid customer session"}), 401
+        try:
+            authenticated_customer = marketplace_token_serializer().loads(token, max_age=60 * 60 * 12)
+        except BadSignature:
+            return jsonify({"success": False, "message": "Your session has expired. Please sign in again."}), 401
+        if authenticated_customer.get("role") != "customer":
+            return jsonify({"success": False, "message": "Only customer accounts can place orders"}), 403
+
     data = request.get_json(silent=True) or {}
     customer_name = str(data.get("Customer_Name", "")).strip()
     customer_email = str(data.get("Customer_Email", "")).strip()
@@ -2313,27 +2743,48 @@ def store_checkout():
             total += unit_price * quantity
             locked_products.append((product, quantity, unit_price))
 
-        cur.execute("""
-            SELECT Customer_ID
-            FROM CUSTOMER
-            WHERE Customer_Email = %s
-            LIMIT 1
-            FOR UPDATE
-        """, (customer_email,))
-        customer = cur.fetchone()
-        if customer:
+        if authenticated_customer:
+            cur.execute("""
+                SELECT c.Customer_ID, c.Customer_Name, c.Customer_Email
+                FROM MARKETPLACE_ACCOUNT a
+                INNER JOIN CUSTOMER c ON a.User_ID = c.Customer_ID
+                WHERE a.Account_Role = 'customer'
+                  AND a.User_ID = %s
+                FOR UPDATE
+            """, (authenticated_customer["id"],))
+            customer = cur.fetchone()
+            if not customer:
+                raise ValueError("Your customer account is no longer available")
             customer_id = customer["Customer_ID"]
+            customer_name = customer["Customer_Name"]
+            customer_email = customer["Customer_Email"]
             cur.execute("""
                 UPDATE CUSTOMER
-                SET Customer_Name = %s, Customer_Address = %s
+                SET Customer_Address = %s
                 WHERE Customer_ID = %s
-            """, (customer_name, customer_address, customer_id))
+            """, (customer_address, customer_id))
         else:
             cur.execute("""
-                INSERT INTO CUSTOMER (Customer_Name, Customer_Email, Customer_Address)
-                VALUES (%s, %s, %s)
-            """, (customer_name, customer_email, customer_address))
-            customer_id = cur.lastrowid
+                SELECT Customer_ID
+                FROM CUSTOMER
+                WHERE Customer_Email = %s
+                LIMIT 1
+                FOR UPDATE
+            """, (customer_email,))
+            customer = cur.fetchone()
+            if customer:
+                customer_id = customer["Customer_ID"]
+                cur.execute("""
+                    UPDATE CUSTOMER
+                    SET Customer_Name = %s, Customer_Address = %s
+                    WHERE Customer_ID = %s
+                """, (customer_name, customer_address, customer_id))
+            else:
+                cur.execute("""
+                    INSERT INTO CUSTOMER (Customer_Name, Customer_Email, Customer_Address)
+                    VALUES (%s, %s, %s)
+                """, (customer_name, customer_email, customer_address))
+                customer_id = cur.lastrowid
 
         if customer_phone:
             cur.execute("""

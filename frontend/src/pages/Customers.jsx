@@ -126,7 +126,7 @@ function Customers() {
 
     try {
       const response = await fetch(
-        "http://localhost:5000/api/customers/${customerId}",
+        `http://localhost:5000/api/customers/${customerId}`,
         {
           method: "DELETE",
         }

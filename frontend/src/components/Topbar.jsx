@@ -1,8 +1,16 @@
-import { Link } from "react-router-dom";
-import { Bell, Search } from "lucide-react";
+import { Link, useNavigate } from "react-router-dom";
+import { LogOut, Search } from "lucide-react";
+import NotificationBell from "./NotificationBell";
 
 function Topbar() {
+  const navigate = useNavigate();
   const adminName = localStorage.getItem("adminUsername") || "Admin";
+
+  const handleLogout = () => {
+    localStorage.removeItem("adminLoggedIn");
+    localStorage.removeItem("adminUsername");
+    navigate("/login", { replace: true });
+  };
 
   return (
     <header className="topbar">
@@ -21,12 +29,21 @@ function Topbar() {
         <Link className="primary-btn small topbar-campaign-link" to="/offers">+ New Campaign</Link>
 
         <div className="profile">
-          <span className="notification"><Bell size={17} strokeWidth={1.8} aria-hidden="true" /></span>
+          <NotificationBell role="admin" />
           <div className="avatar">{adminName.charAt(0).toUpperCase()}</div>
           <div className="profile-info">
             <strong>{adminName}</strong>
             <small>Marketplace Admin</small>
           </div>
+          <button
+            className="ghost-btn admin-logout-btn"
+            type="button"
+            onClick={handleLogout}
+            aria-label="Log out of admin account"
+          >
+            <LogOut size={16} aria-hidden="true" />
+            <span>Log out</span>
+          </button>
         </div>
       </div>
     </header>

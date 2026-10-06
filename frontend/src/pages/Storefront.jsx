@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
-import { useSearchParams } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import { Heart, Search, ShoppingCart } from "lucide-react";
+import { getMarketplaceSession } from "../auth";
 
 const API = "http://localhost:5000/api";
 const FALLBACK_IMAGE = "https://images.unsplash.com/photo-1498049794561-7780e7231661?auto=format&fit=crop&w=900&q=85";
@@ -33,6 +34,12 @@ const money = (amount) => new Intl.NumberFormat("en-IN", {
 }).format(Number(amount) || 0);
 
 function Storefront() {
+  const navigate = useNavigate();
+  const customerSession = getMarketplaceSession("customer");
+  const customerId = customerSession?.user.id;
+  const hasCustomerSession = Boolean(customerId);
+  const cartStorageKey = hasCustomerSession ? `gridmartCart:${customerId}` : "gridmartCart";
+  const wishlistStorageKey = hasCustomerSession ? `gridmartWishlist:${customerId}` : "gridmartWishlist";
   const [products, setProducts] = useState([]);
   const [categories, setCategories] = useState([]);
   const [offers, setOffers] = useState([]);
@@ -43,7 +50,10 @@ function Storefront() {
   const [sort, setSort] = useState("featured");
   const [cart, setCart] = useState(() => {
     try {
-      const saved = JSON.parse(localStorage.getItem("gridmartCart") || "[]");
+      const savedCart = localStorage.getItem(cartStorageKey)
+        || (hasCustomerSession ? localStorage.getItem("gridmartCart") : null)
+        || "[]";
+      const saved = JSON.parse(savedCart);
       return Array.isArray(saved) ? saved : [];
     } catch {
       return [];
@@ -54,7 +64,10 @@ function Storefront() {
   const [searchParams, setSearchParams] = useSearchParams();
   const [wishlist, setWishlist] = useState(() => {
     try {
-      const saved = JSON.parse(localStorage.getItem("gridmartWishlist") || "[]");
+      const savedWishlist = localStorage.getItem(wishlistStorageKey)
+        || (hasCustomerSession ? localStorage.getItem("gridmartWishlist") : null)
+        || "[]";
+      const saved = JSON.parse(savedWishlist);
       return Array.isArray(saved) ? saved.map(Number) : [];
     } catch {
       return [];
@@ -65,8 +78,8 @@ function Storefront() {
   const [checkoutError, setCheckoutError] = useState("");
   const [orderNumber, setOrderNumber] = useState("");
   const [form, setForm] = useState({
-    Customer_Name: "",
-    Customer_Email: "",
+    Customer_Name: customerSession?.user.name || "",
+    Customer_Email: customerSession?.user.email || "",
     Customer_Phone: "",
     Customer_Address: "",
     Payment_Method: "UPI",
@@ -105,12 +118,14 @@ function Storefront() {
   }, []);
 
   useEffect(() => {
-    localStorage.setItem("gridmartCart", JSON.stringify(cart));
-  }, [cart]);
+    localStorage.setItem(cartStorageKey, JSON.stringify(cart));
+    if (hasCustomerSession) localStorage.removeItem("gridmartCart");
+  }, [cart, cartStorageKey, hasCustomerSession]);
 
   useEffect(() => {
-    localStorage.setItem("gridmartWishlist", JSON.stringify(wishlist));
-  }, [wishlist]);
+    localStorage.setItem(wishlistStorageKey, JSON.stringify(wishlist));
+    if (hasCustomerSession) localStorage.removeItem("gridmartWishlist");
+  }, [wishlist, wishlistStorageKey, hasCustomerSession]);
 
   useEffect(() => {
     if (searchParams.get("view") === "wishlist") {
@@ -210,7 +225,10 @@ function Storefront() {
     try {
       const response = await fetch(`${API}/store/checkout`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          ...(customerSession ? { Authorization: `Bearer ${customerSession.token}` } : {}),
+        },
         body: JSON.stringify({ ...form, items: cart }),
       });
       const data = await response.json();
@@ -245,7 +263,13 @@ function Storefront() {
           />
         </label>
         <div className="store-actions">
-          <a className="store-admin-link" href="/login">Admin</a>
+          {!customerSession && <a className="store-admin-link" href="/login">Admin</a>}
+          {customerSession ? (
+            <a className="store-role-link" href="/customer/account">{customerSession.user.name}</a>
+          ) : (
+            <a className="store-role-link" href="/login?role=customer">Customer sign in</a>
+          )}
+          {!customerSession && <a className="store-role-link" href="/login?role=seller">Seller</a>}
           <button className="store-wishlist-button" onClick={() => setWishlistOpen(true)} aria-label={`Open wishlist, ${wishlist.length} saved products`}>
             <Heart size={17} strokeWidth={1.8} aria-hidden="true" /> Wishlist <b>{wishlist.length}</b>
           </button>
@@ -370,7 +394,7 @@ function Storefront() {
         </section>
       </main>
 
-      <footer className="store-footer"><a className="store-brand" href="/shop"><span className="store-brand-mark">G</span><span>Grid<span>Mart</span><small>Everything, closer.</small></span></a><span>Orders are placed against live marketplace inventory.</span><a href="/login">Marketplace administration</a></footer>
+      <footer className="store-footer"><a className="store-brand" href="/shop"><span className="store-brand-mark">G</span><span>Grid<span>Mart</span><small>Everything, closer.</small></span></a><span>Orders are placed against live marketplace inventory.</span><nav className="store-footer-portals" aria-label="Marketplace accounts">{customerSession ? <a href="/customer/account">Your customer account</a> : <><a href="/login?role=customer">Customer account</a><a href="/login?role=seller">Seller workspace</a><a href="/login">Marketplace administration</a></>}</nav></footer>
 
       {cartOpen && (
         <div className="store-overlay" onMouseDown={(event) => event.target === event.currentTarget && setCartOpen(false)}>
@@ -387,7 +411,14 @@ function Storefront() {
                     </div>
                   ))}
                 </div>
-                <div className="store-cart-summary"><div><span>Subtotal</span><strong>{money(cartTotal)}</strong></div><small>Shipping and payment are confirmed at checkout. Payment is recorded as pending.</small><button onClick={() => { setCheckoutError(""); setCheckoutOpen(true); }}>Continue to checkout <span aria-hidden="true">→</span></button></div>
+                <div className="store-cart-summary"><div><span>Subtotal</span><strong>{money(cartTotal)}</strong></div><small>Shipping and payment are confirmed at checkout. Payment is recorded as pending.</small><button onClick={() => {
+                  if (!customerSession) {
+                    navigate("/login?role=customer");
+                    return;
+                  }
+                  setCheckoutError("");
+                  setCheckoutOpen(true);
+                }}>Continue to checkout <span aria-hidden="true">→</span></button></div>
               </>
             ) : <div className="store-empty"><strong>Your cart is waiting.</strong><span>Add something from the catalog to get started.</span><button onClick={() => setCartOpen(false)}>Continue shopping</button></div>}
           </aside>
@@ -453,8 +484,8 @@ function Storefront() {
             <div className="store-checkout-total"><span>To pay</span><strong>{money(cartTotal)}</strong></div>
             <form onSubmit={submitOrder}>
               <div className="store-form-grid">
-                <label>Full name<input required autoComplete="name" value={form.Customer_Name} onChange={(event) => setForm({ ...form, Customer_Name: event.target.value })} /></label>
-                <label>Email address<input required type="email" autoComplete="email" value={form.Customer_Email} onChange={(event) => setForm({ ...form, Customer_Email: event.target.value })} /></label>
+                <label>Full name<input required readOnly={Boolean(customerSession)} autoComplete="name" value={form.Customer_Name} onChange={(event) => setForm({ ...form, Customer_Name: event.target.value })} /></label>
+                <label>Email address<input required readOnly={Boolean(customerSession)} type="email" autoComplete="email" value={form.Customer_Email} onChange={(event) => setForm({ ...form, Customer_Email: event.target.value })} /></label>
                 <label>Phone number <span>(optional)</span><input type="tel" autoComplete="tel" value={form.Customer_Phone} onChange={(event) => setForm({ ...form, Customer_Phone: event.target.value })} /></label>
                 <label className="store-address-field">Delivery address<textarea required autoComplete="street-address" rows="3" value={form.Customer_Address} onChange={(event) => setForm({ ...form, Customer_Address: event.target.value })} /></label>
                 <label className="store-payment-field">Payment method<select value={form.Payment_Method} onChange={(event) => setForm({ ...form, Payment_Method: event.target.value })}><option>UPI</option><option>Credit Card</option><option>Debit Card</option><option>Net Banking</option><option>Cash on Delivery</option></select></label>

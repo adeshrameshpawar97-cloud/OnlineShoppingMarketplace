@@ -16,7 +16,15 @@ import Payments from "./pages/Payments";
 import Delivery from "./pages/Delivery";
 import Reviews from "./pages/Reviews";
 import Storefront from "./pages/Storefront";
+import CustomerAccount from "./pages/CustomerAccount";
+import SellerPortal from "./pages/SellerPortal";
+import { getMarketplaceSession } from "./auth";
 
+function MarketplaceRoleRoute({ role, children }) {
+  return getMarketplaceSession(role)
+    ? children
+    : <Navigate to={`/login?role=${role}`} replace />;
+}
 
 function ProtectedLayout() {
 
@@ -120,6 +128,24 @@ function App() {
       <Route
         path="/shop"
         element={<Storefront />}
+      />
+
+      <Route
+        path="/customer/account"
+        element={(
+          <MarketplaceRoleRoute role="customer">
+            <CustomerAccount />
+          </MarketplaceRoleRoute>
+        )}
+      />
+
+      <Route
+        path="/seller"
+        element={(
+          <MarketplaceRoleRoute role="seller">
+            <SellerPortal />
+          </MarketplaceRoleRoute>
+        )}
       />
 
       <Route

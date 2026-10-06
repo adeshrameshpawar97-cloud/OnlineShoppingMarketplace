@@ -115,7 +115,7 @@ function Sellers() {
 
     try {
       const response = await fetch(
-        "http://localhost:5000/api/sellers/${sellerId}",
+        `http://localhost:5000/api/sellers/${sellerId}`,
         {
           method: "DELETE",
         }
